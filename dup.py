@@ -3,9 +3,9 @@ import pandas as pd
 import numpy as np
 import joblib
 
-# =============================
+
 # PAGE CONFIG
-# =============================
+
 
 st.set_page_config(
     page_title="Perovskite Stability Prediction",
@@ -13,9 +13,80 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# =============================
+import base64
+import streamlit as st
+
+def set_background(image_file):
+    with open(image_file, "rb") as img:
+        encoded = base64.b64encode(img.read()).decode()
+
+    st.markdown(f"""
+    <style>
+
+    /* ===== Full Background ===== */
+    .stApp {{
+        background: url("data:image/jpg;base64,{encoded}") no-repeat center center fixed;
+        background-size: cover;
+    }}
+
+    /* Dark overlay */
+    .stApp::before {{
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.65);
+        z-index: 0;
+    }}
+
+    .main {{
+        position: relative;
+        z-index: 1;
+    }}
+
+    /* Remove Streamlit white header */
+    header {{
+        background: transparent !important;
+    }}
+
+    [data-testid="stHeader"] {{
+        background: transparent !important;
+    }}
+
+    /* Remove default white block backgrounds */
+    .block-container {{
+        background: transparent !important;
+        padding-top: 2rem;
+    }}
+
+    /* === Apply glass ONLY to actual content containers === */
+    section.main > div {{
+        background: transparent !important;
+    }}
+
+    /* Style ONLY your columns (not wrapper divs) */
+    div[data-testid="column"] > div {{
+        background: rgba(255,255,255,0.10);
+        backdrop-filter: blur(10px);
+        border-radius: 15px;
+        padding: 20px;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+    }}
+
+    /* Make headings white */
+    h1, h2, h3, h4, h5, h6, label, p {{
+        color: white !important;
+    }}
+
+    </style>
+    """, unsafe_allow_html=True)
+
+set_background("solaar bg.jpg")
+
+
+
+
 # LOAD DATASET
-# =============================
+
 
 DATA_PATH = "Perovskite_database_content_all_data.csv"
 
@@ -25,9 +96,9 @@ def load_dataset(path):
 
 df = load_dataset(DATA_PATH)
 
-# =============================
+
 # HELPER FUNCTIONS
-# =============================
+
 
 def unique_vals(col):
     return sorted(df[col].dropna().astype(str).unique())
@@ -37,14 +108,13 @@ def num_range(col):
     valid = series.dropna()
 
     if valid.empty:
-        st.warning(f"No valid numeric values found in column: {col}")
         return 0.0, 1.0, 0.5
 
     return float(valid.min()), float(valid.max()), float(valid.median())
 
-# =============================
+
 # LOAD RANDOM FOREST MODEL
-# =============================
+
 
 @st.cache_resource
 def load_rf_model():
@@ -61,9 +131,15 @@ def load_xgb_model():
     encoder = joblib.load("models/encoder.pkl")
     return model, scaler, encoder
 
-# =============================
+@st.cache_resource
+def load_krr_model():
+    model = joblib.load("models/krr_model.pkl")
+    scaler = joblib.load("models/scaler.pkl")
+    encoder = joblib.load("models/encoder.pkl")
+    return model, scaler, encoder
+
 # PREDICTION FUNCTION
-# =============================
+
 def predict_stability(user_inputs, model, scaler, encoder):
 
     categorical_cols = [
@@ -122,9 +198,9 @@ def predict_stability(user_inputs, model, scaler, encoder):
     prediction = np.expm1(log_prediction)
 
     return float(prediction[0])
-# =============================
+
 # CSS
-# =============================
+
 
 st.markdown("""
 <style>
@@ -136,17 +212,19 @@ st.markdown("""
     border-radius:12px;
     color:white;
     text-align:center;
+    margin-top:50px;   /* Pull it upward */
     margin-bottom:30px;
 }
 
 .score-bar {
-    border:3px solid black;
+    border:3px solid white;
     border-radius:50px;
     padding:18px;
     text-align:center;
     font-size:22px;
     font-weight:600;
     margin-top:30px;
+    color:white;
 }
 
 div.stButton > button {
@@ -157,6 +235,7 @@ div.stButton > button {
     border-radius:8px;
     border:none;
 }
+
 
 .summary-grid {
     display:grid;
@@ -185,9 +264,9 @@ div.stButton > button {
 </style>
 """, unsafe_allow_html=True)
 
-# =============================
+
 # TITLE
-# =============================
+
 
 st.markdown("""
 <div class="app-header">
@@ -198,9 +277,9 @@ st.markdown("""
 
 st.success(f"Dataset Shape: {df.shape[0]} rows × {df.shape[1]} columns")
 
-# =============================
+
 # MAIN UI
-# =============================
+
 
 left_col, right_col = st.columns([2, 1])
 
@@ -261,17 +340,16 @@ with right_col:
         ]
     )
 
-    st.info(f"**Current Model:** {model_selected}")
 
-# =============================
+
 # RUN BUTTON
-# =============================
+
 
 run = st.button("Run Stability Prediction")
 
-# =============================
+
 # OUTPUT
-# =============================
+
 
 if run:
 
@@ -288,15 +366,18 @@ if run:
         "Stability_time_total_exposure": exposure_time
     }
 
-    # =============================
+    
     # MODEL SELECTION
-    # =============================
+    
 
     if model_selected == "Random Forest":
         model, scaler, encoder = load_rf_model()
 
     elif model_selected == "XGBoost":
         model, scaler, encoder = load_xgb_model()
+
+    elif model_selected == "Kernel Ridge Regression":
+        model, scaler, encoder = load_krr_model()
 
     else:
         st.warning("Selected model is not implemented yet.")
@@ -305,9 +386,9 @@ if run:
     prediction = predict_stability(user_input, model, scaler, encoder)
     predicted_hours = round(prediction, 2)
 
-    # =============================
+    
     # STABILITY LEVEL CLASSIFICATION
-    # =============================
+    
 
     if predicted_hours < 200:
         level = "Low Stability (< 200 hours)"
@@ -329,7 +410,9 @@ if run:
             Predicted Stability Result
         </div>
         """, unsafe_allow_html=True)
-
+    st.markdown("")
+    st.markdown("")
+    st.info(f"**Current Model:** {model_selected}")
     st.markdown(f"""
         <div class="summary-grid">
             <div class="summary-card">
