@@ -186,9 +186,7 @@ def predict_ann_best(user_input, model, scaler, columns, encoders):
     # ==========================
     # ALIGN + SCALE
     # ==========================
-    df = df.reindex(columns=columns, fill_value=0)
-    df = df.fillna(0)
-    df = df.replace([np.inf, -np.inf], 0)
+    df = df[columns]
     X = scaler.transform(df.values.astype(float))
 
     # ==========================
@@ -196,12 +194,8 @@ def predict_ann_best(user_input, model, scaler, columns, encoders):
     # ==========================
     probs = model.predict(X)[0]
 
-    # 🔥 safety fix
-    if np.isnan(probs).any():
-        probs = np.array([0.33, 0.33, 0.34])
-
     pred_class = np.argmax(probs)
-    confidence = float(np.max(probs)) if not np.isnan(probs).any() else 0.0
+    confidence = float(np.max(probs))
 
     labels = {
         0: "Low Stability",
@@ -257,9 +251,7 @@ def predict_hybrid(user_input,
     df_ann["interaction"] = df_ann["Perovskite_band_gap"] * df_ann["Perovskite_thickness"]
     df_ann["env_effect"] = df_ann["Stability_temperature_range"] * df_ann["Stability_relative_humidity_range"]
 
-    df_ann = df_ann.reindex(columns=ann_columns, fill_value=0)
-    df_ann = df_ann.fillna(0)
-    df_ann = df_ann.replace([np.inf, -np.inf], 0)
+    df_ann = df_ann[ann_columns]
 
     X_ann = ann_scaler.transform(df_ann.values.astype(float))
     ann_probs = ann.predict(X_ann)[0]
@@ -554,7 +546,7 @@ if run:
             level = "Low Stability"
             color = "red"
 
-        display_value = f"{level} ({confidence*100:.1f}%)"
+        display_value = level
 
 
 
@@ -645,19 +637,13 @@ if run:
         else:
             low_p += boost
 
-                # normalize
+        # normalize
         total = low_p + mod_p + high_p
 
-        if total == 0:
-            low_p, mod_p, high_p = 0.33, 0.33, 0.34
-        else:
-            low_p /= total
-            mod_p /= total
-            high_p /= total
+        low_p /= total
+        mod_p /= total
+        high_p /= total
         col1, col2, col3 = st.columns(3)
-        low_p = max(0, min(1, low_p))
-        mod_p = max(0, min(1, mod_p))
-        high_p = max(0, min(1, high_p))
 
         with col1:
             st.write("🔴 Low")
