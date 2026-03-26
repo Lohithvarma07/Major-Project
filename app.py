@@ -647,17 +647,17 @@ if run:
 
         with col1:
             st.write("🔴 Low")
-            st.progress(float(low_p))
+            st.progress(float(low_p)/ 100)
             st.caption(f"{low_p*100:.1f}%")
 
         with col2:
             st.write("🟠 Moderate")
-            st.progress(float(mod_p))
+            st.progress(float(mod_p/ 100))
             st.caption(f"{mod_p*100:.1f}%")
 
         with col3:
             st.write("🟢 High")
-            st.progress(float(high_p))
+            st.progress(float(high_p)/ 100)
             st.caption(f"{high_p*100:.1f}%")
 
 
