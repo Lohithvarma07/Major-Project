@@ -6,3 +6,5 @@ xgboost
 joblib
 matplotlib
 plotly
+keras
+tensorflow
