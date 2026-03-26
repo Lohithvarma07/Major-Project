@@ -49,7 +49,7 @@ X_train, X_test, y_train, y_test = train_test_split(
 )
 
 model = XGBRegressor(
-    n_estimators=600,
+    n_estimators=500,
     learning_rate=0.05,
     max_depth=6,
     subsample=0.8,

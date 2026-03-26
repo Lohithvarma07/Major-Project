@@ -2,20 +2,19 @@ import os
 import pandas as pd
 import numpy as np
 import joblib
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import StandardScaler
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 
-df = pd.read_csv(os.path.join(BASE_DIR, "Perovskite_database_content_all_data.csv"), low_memory=False)
+df = pd.read_csv(
+    os.path.join(BASE_DIR, "Perovskite_database_content_all_data.csv"),
+    low_memory=False
+)
 
-categorical_cols = [
-    "Perovskite_composition_short_form",
-    "ETL_stack_sequence",
-    "HTL_stack_sequence",
-    "Encapsulation"
-]
-
+# ==========================
+# 🔥 NUMERIC ONLY (NO CATEGORICAL)
+# ==========================
 numeric_cols = [
     "Perovskite_thickness",
     "Perovskite_band_gap",
@@ -27,27 +26,49 @@ numeric_cols = [
 
 target = "Stability_PCE_T80"
 
-df = df[categorical_cols + numeric_cols + [target]]
+df = df[numeric_cols + [target]]
+
+# ==========================
+# CLEAN
+# ==========================
+for col in numeric_cols:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+df = df.replace([np.inf, -np.inf], np.nan)
+
+df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].median())
 df = df.dropna(subset=[target])
 
-df[numeric_cols] = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
-df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].median())
+# ==========================
+# 🔥 FEATURE ENGINEERING (IMPORTANT)
+# ==========================
+# FEATURE ENGINEERING
+df["interaction"] = df["Perovskite_band_gap"] * df["Perovskite_thickness"]
 
-df[categorical_cols] = df[categorical_cols].fillna("Unknown")
+df["log_thickness"] = np.log1p(df["Perovskite_thickness"])  # ✅ ADD THIS
 
-df = df[df[target] < 5000]
+df["env_effect"] = (
+    df["Stability_temperature_range"] *
+    df["Stability_relative_humidity_range"]
+)
 
-# 🔥 For KRR we make dense encoding
-encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-encoded_cat = encoder.fit_transform(df[categorical_cols])
+numeric_cols.extend(["interaction", "log_thickness", "env_effect"])
 
-X = np.concatenate([encoded_cat, df[numeric_cols].values], axis=1)
+# ==========================
+# FINAL FEATURES
+# ==========================
+X = df[numeric_cols].values
+X = np.nan_to_num(X)
 
-# 🔥 KRR needs scaling
+# ==========================
+# SCALE ONLY (NO ENCODER)
+# ==========================
 scaler = StandardScaler()
 scaler.fit(X)
 
-joblib.dump(encoder, os.path.join(MODEL_DIR, "krr_encoder.pkl"))
+# ==========================
+# SAVE ONLY SCALER
+# ==========================
 joblib.dump(scaler, os.path.join(MODEL_DIR, "krr_scaler.pkl"))
 
-print("KRR preprocessing created.")
+print("✅ KRR preprocessing fixed (numeric only)")

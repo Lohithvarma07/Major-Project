@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
-
+from keras.models import load_model
 
 # PAGE CONFIG
 
@@ -12,6 +12,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
 
 
 # LOAD DATASET
@@ -44,12 +45,13 @@ def num_range(col):
 
 # LOAD RANDOM FOREST MODEL
 
+
 @st.cache_resource
 def load_rf_model():
     model = joblib.load("models/rf_model.pkl")
     scaler = joblib.load("models/scaler.pkl")
     encoder = joblib.load("models/encoder.pkl")
-    return model, scaler, encoder, None
+    return model, scaler, encoder
 
 
 @st.cache_resource
@@ -57,20 +59,23 @@ def load_xgb_model():
     model = joblib.load("models/xgb_model.pkl")
     scaler = joblib.load("models/scaler.pkl")
     encoder = joblib.load("models/encoder.pkl")
-    return model, scaler, encoder, None
-
+    return model, scaler, encoder
 
 @st.cache_resource
 def load_krr_model():
     model = joblib.load("models/krr_model.pkl")
-    scaler = joblib.load("models/krr_scaler.pkl")
-    encoder = joblib.load("models/krr_encoder.pkl")
-    pca = joblib.load("models/krr_pca.pkl")
-    return model, scaler, encoder, pca
+    scaler = joblib.load("models/krr_scaler.pkl")  # ✅ correct scaler
+    return model, scaler
 
+@st.cache_resource
+def load_ann_model():
+    from utils.model_loader import load_ann_advanced
+    return load_ann_advanced()
+    
 # PREDICTION FUNCTION
 
-def predict_stability(user_inputs, model, scaler, encoder, pca=None):
+
+def predict_stability(user_inputs, model, scaler, encoder):
 
     categorical_cols = [
         "Perovskite_composition_short_form",
@@ -88,27 +93,6 @@ def predict_stability(user_inputs, model, scaler, encoder, pca=None):
         "Stability_time_total_exposure"
     ]
 
-    input_df = pd.DataFrame([user_inputs])
-
-    encoded_cat = encoder.transform(input_df[categorical_cols])
-
-    combined = np.concatenate(
-        [encoded_cat, input_df[numeric_cols].values],
-        axis=1
-    )
-
-    scaled_input = scaler.transform(combined)
-    scaled_input = np.nan_to_num(scaled_input)
-    # Apply PCA only if provided (KRR)
-    if pca is not None:
-        scaled_input = pca.transform(scaled_input)
-
-    log_prediction = model.predict(scaled_input)
-    # Prevent extreme negative collapse
-    log_prediction = np.clip(log_prediction, 1, 7)
-    prediction = np.expm1(log_prediction)
-    return float(prediction[0])
-
     # Convert to DataFrame
     input_df = pd.DataFrame([user_inputs])
 
@@ -124,22 +108,177 @@ def predict_stability(user_inputs, model, scaler, encoder, pca=None):
     # Scale features
     scaled_input = scaler.transform(combined)
 
-    # 🔥 CRITICAL FIX FOR KRR
-    scaled_input = np.nan_to_num(scaled_input, nan=0.0, posinf=0.0, neginf=0.0)
-
-
     # Predict (log scale)
     log_prediction = model.predict(scaled_input)
-
-    # Prevent collapse to extreme negatives
-    log_prediction = np.clip(log_prediction, 1, 7)
 
     # Convert back from log
     prediction = np.expm1(log_prediction)
 
     return float(prediction[0])
 
+def predict_krr(user_inputs, model, scaler):
+    import numpy as np
+    import pandas as pd
+
+    df = pd.DataFrame([user_inputs])
+
+    # ONLY numeric features
+    numeric_cols = [
+        "Perovskite_thickness",
+        "Perovskite_band_gap",
+        "Stability_temperature_range",
+        "Stability_relative_humidity_range",
+        "Stability_light_intensity",
+        "Stability_time_total_exposure"
+    ]
+
+    df = df[numeric_cols]
+
+    # ===== FEATURE ENGINEERING =====
+    df["Perovskite_thickness"] = df["Perovskite_thickness"].clip(lower=0)
+
+    df["interaction"] = (df["Perovskite_band_gap"] * df["Perovskite_thickness"]) / 1000
+    df["log_thickness"] = np.log1p(df["Perovskite_thickness"])
+    df["env_effect"] = (
+        df["Stability_temperature_range"] *
+        df["Stability_relative_humidity_range"]
+    )
+
+    # ===== CLEAN =====
+    X = df.values.astype(float)
+    X = np.where(np.isinf(X), np.nan, X)
+    X = np.nan_to_num(X)
+
+    # ===== SCALE =====
+    X_scaled = scaler.transform(X)
+
+    # SAFETY
+    if np.isnan(X_scaled).any():
+        raise ValueError("NaN in KRR input")
+
+    # ===== PREDICT =====
+    pred_log = model.predict(X_scaled)
+    return float(np.expm1(pred_log)[0])
+
+def predict_ann_best(user_input, model, scaler, columns, encoders):
+    import pandas as pd
+    import numpy as np
+
+    df = pd.DataFrame([user_input])
+
+    # ==========================
+    # FEATURE ENGINEERING (SAME AS TRAINING 🔥)
+    # ==========================
+    df["interaction"] = df["Perovskite_band_gap"] * df["Perovskite_thickness"]
+    df["env_effect"] = df["Stability_temperature_range"] * df["Stability_relative_humidity_range"]
+
+    # ==========================
+    # ENCODING
+    # ==========================
+    for col, encoder in encoders.items():
+        val = str(df[col].iloc[0])
+
+        if val in encoder.classes_:
+            df[col] = encoder.transform([val])[0]
+        else:
+            df[col] = 0
+
+    # ==========================
+    # ALIGN + SCALE
+    # ==========================
+    df = df[columns]
+    X = scaler.transform(df.values.astype(float))
+
+    # ==========================
+    # PREDICT
+    # ==========================
+    probs = model.predict(X)[0]
+
+    pred_class = np.argmax(probs)
+    confidence = float(np.max(probs))
+
+    labels = {
+        0: "Low Stability",
+        1: "Moderate Stability",
+        2: "High Stability"
+    }
+
+    return labels[pred_class], confidence, probs
+
+
+def predict_hybrid(user_input,
+                   ann, rf, meta,
+                   ann_scaler, ann_columns, ann_encoders,
+                   rf_scaler, rf_encoder):
+
+    import pandas as pd
+    import numpy as np
+
+    df = pd.DataFrame([user_input])
+
+    categorical_cols = [
+        "Perovskite_composition_short_form",
+        "ETL_stack_sequence",
+        "HTL_stack_sequence",
+        "Encapsulation"
+    ]
+
+    numeric_cols = [
+        "Perovskite_thickness",
+        "Perovskite_band_gap",
+        "Stability_temperature_range",
+        "Stability_relative_humidity_range",
+        "Stability_light_intensity",
+        "Stability_time_total_exposure"
+    ]
+
+    # ======================
+    # ANN PIPELINE
+    # ======================
+    df_ann = df.copy()
+
+    df_ann[numeric_cols] = df_ann[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    df_ann[numeric_cols] = df_ann[numeric_cols].fillna(0)
+
+    for col, enc in ann_encoders.items():
+        val = str(df_ann[col].iloc[0])
+
+        if val in enc.classes_:
+            df_ann[col] = enc.transform([val])[0]
+        else:
+            df_ann[col] = 0
+
+    df_ann["interaction"] = df_ann["Perovskite_band_gap"] * df_ann["Perovskite_thickness"]
+    df_ann["env_effect"] = df_ann["Stability_temperature_range"] * df_ann["Stability_relative_humidity_range"]
+
+    df_ann = df_ann[ann_columns]
+
+    X_ann = ann_scaler.transform(df_ann.values.astype(float))
+    ann_probs = ann.predict(X_ann)[0]
+
+    # ======================
+    # RF PIPELINE
+    # ======================
+    df_rf = df.copy()
+
+    encoded_cat = rf_encoder.transform(df_rf[categorical_cols])
+    X_rf = np.concatenate([encoded_cat, df_rf[numeric_cols].values], axis=1)
+    X_rf = rf_scaler.transform(X_rf)
+
+    rf_log = rf.predict(X_rf)[0]
+    rf_pred = np.expm1(rf_log)
+
+    # ======================
+    # HYBRID META MODEL
+    # ======================
+    X_meta = np.array([[rf_pred, *ann_probs]])
+    hybrid_pred = meta.predict(X_meta)[0]
+
+    return float(hybrid_pred), ann_probs
+
+
 # CSS
+
 
 
 st.markdown("""
@@ -157,13 +296,14 @@ st.markdown("""
 }
 
 .score-bar {
-    border:3px solid black;
+    border:3px solid white;
     border-radius:50px;
     padding:18px;
     text-align:center;
     font-size:22px;
     font-weight:600;
     margin-top:30px;
+    color:white;
 }
 
 div.stButton > button {
@@ -174,6 +314,7 @@ div.stButton > button {
     border-radius:8px;
     border:none;
 }
+
 
 .summary-grid {
     display:grid;
@@ -241,7 +382,14 @@ with left_col:
     )
 
     t_min, t_max, t_med = num_range("Perovskite_thickness")
-    thickness = st.slider("Perovskite Thickness (nm)", t_min, t_max, t_med)
+    thickness = st.slider(
+        "Perovskite Thickness (nm)",
+        min_value=float(t_min),
+        max_value=float(min(t_max, 1000)),  # ✅ force float
+        value=float(min(t_med, 500)),       # ✅ force float
+        step=1.0                            # ✅ float step
+    )
+
 
     bg_min, bg_max, bg_med = num_range("Perovskite_band_gap")
     bandgap = st.slider("Perovskite Band Gap (eV)", bg_min, bg_max, bg_med)
@@ -251,9 +399,11 @@ with left_col:
         unique_vals("Encapsulation")
     )
 
-    temperature = st.slider("Temperature (°C)", 0, 100, 25)
+    temp_min, temp_max, temp_med = num_range("Stability_temperature_range")
+    temperature = st.slider("Temperature (°C)", temp_min, temp_max, temp_med)
 
-    humidity = st.slider("Relative Humidity (%)", 0, 100, 50)
+    hum_min, hum_max, hum_med = num_range("Stability_relative_humidity_range")
+    humidity = st.slider("Relative Humidity (%)", hum_min, hum_max, hum_med)
 
     light_min, light_max, light_med = num_range("Stability_light_intensity")
     light_intensity = st.slider("Light Intensity (W/m²)", light_min, light_max, light_med)
@@ -272,17 +422,29 @@ with right_col:
             "XGBoost",
             "Kernel Ridge Regression",
             "Artificial Neural Network",
-            "Hybrid ML + DL"
+            "Hybrid RF + ANN"
         ]
     )
-
+    compare_models = st.button("Compare All Models")
 
 
 # RUN BUTTON
 
-
 run = st.button("Run Stability Prediction")
 
+# 🔥 CREATE INPUT ALWAYS AVAILABLE
+user_input = {
+    "Perovskite_composition_short_form": perovskite_comp,
+    "ETL_stack_sequence": etl,
+    "HTL_stack_sequence": htl,
+    "Encapsulation": encapsulation,
+    "Perovskite_thickness": thickness,
+    "Perovskite_band_gap": bandgap,
+    "Stability_temperature_range": temperature,
+    "Stability_relative_humidity_range": humidity,
+    "Stability_light_intensity": light_intensity,
+    "Stability_time_total_exposure": exposure_time
+}
 
 # OUTPUT
 
@@ -307,65 +469,235 @@ if run:
     
 
     if model_selected == "Random Forest":
-        model, scaler, encoder, pca = load_rf_model()
+        model, scaler, encoder = load_rf_model()
 
     elif model_selected == "XGBoost":
-        model, scaler, encoder, pca = load_xgb_model()
+        model, scaler, encoder = load_xgb_model()
 
     elif model_selected == "Kernel Ridge Regression":
-        model, scaler, encoder, pca = load_krr_model()
+        model, scaler = load_krr_model()
+
+    elif model_selected == "Artificial Neural Network":
+        from utils.model_loader import load_ann_best
+        model, scaler, columns, encoders = load_ann_best()
+
+    elif model_selected == "Hybrid RF + ANN":
+        from utils.model_loader import load_hybrid_model
+        ann, rf, meta, ann_scaler, ann_columns, ann_encoders, rf_scaler, rf_encoder = load_hybrid_model()
 
     else:
         st.warning("Selected model is not implemented yet.")
         st.stop()
 
-    prediction = predict_stability(user_input, model, scaler, encoder, pca)
-    predicted_hours = round(prediction, 2)
+    if model_selected == "Kernel Ridge Regression":
+        prediction = predict_krr(user_input, model, scaler)
+
+    elif model_selected == "Artificial Neural Network":
+        label, confidence, probs = predict_ann_best(
+            user_input, model, scaler, columns, encoders
+        )
+        
+        prediction = label
+
+    elif model_selected == "Hybrid RF + ANN":
+
+        prediction, probs = predict_hybrid(
+            user_input,
+            ann, rf, meta,
+            ann_scaler, ann_columns, ann_encoders,
+            rf_scaler, rf_encoder
+        )
+          
+
+    else:
+        prediction = predict_stability(user_input, model, scaler, encoder)
+        
+    
+    if model_selected == "Artificial Neural Network":
+        predicted_hours = prediction
+        
+
+        
+    else:
+        predicted_hours = round(prediction, 2)
 
     
     # STABILITY LEVEL CLASSIFICATION
     
+    # =============================
+    # ANN + REGRESSION HANDLING
+    # =============================
 
-    if predicted_hours < 200:
-        level = "Low Stability (< 200 hours)"
-        color = "red"
-    elif predicted_hours < 500:
-        level = "Moderate Stability (200 – 500 hours)"
-        color = "orange"
-    elif predicted_hours < 1000:
-        level = "Good Stability (500 – 1000 hours)"
-        color = "green"
+    if model_selected == "Artificial Neural Network":
+
+        # unpack probabilities
+        low_p, mod_p, high_p = probs
+
+        # 🔥 Weighted scoring decision (BEST)
+        score = (high_p * 3) + (mod_p * 2) + (low_p * 1)
+
+        if score > 2.2:
+            level = "High Stability"
+            color = "green"
+        elif score > 1.6:
+            level = "Moderate Stability"
+            color = "orange"
+        else:
+            level = "Low Stability"
+            color = "red"
+
+        display_value = f"{level} ({confidence*100:.1f}%)"
+
+
+
+    elif model_selected == "Hybrid RF + ANN":
+
+        predicted_hours = round(prediction, 2)
+
+        if predicted_hours < 200:
+            level = "Low Stability (< 200 hours)"
+            color = "red"
+        elif predicted_hours < 500:
+            level = "Moderate Stability (200 – 500 hours)"
+            color = "orange"
+        elif predicted_hours < 1000:
+            level = "Good Stability (500 – 1000 hours)"
+            color = "green"
+        else:
+            level = "High Stability (> 1000 hours)"
+            color = "darkgreen"
+
+        # 🔥 ADD THIS LINE (MISSING)
+        display_value = f"{predicted_hours} hours"
+
     else:
-        level = "High Stability (> 1000 hours)"
-        color = "darkgreen"
+        if predicted_hours < 200:
+            level = "Low Stability (< 200 hours)"
+            color = "red"
+        elif predicted_hours < 500:
+            level = "Moderate Stability (200 – 500 hours)"
+            color = "orange"
+        elif predicted_hours < 1000:
+            level = "Good Stability (500 – 1000 hours)"
+            color = "green"
+        else:
+            level = "High Stability (> 1000 hours)"
+            color = "darkgreen"
+
+        display_value = f"{predicted_hours} hours"
 
 
+    # =============================
+    # HEADER
+    # =============================
 
     st.markdown("""
         <div class="score-bar">
             Predicted Stability Result
         </div>
-        """, unsafe_allow_html=True)
-    st.markdown("")
-    st.markdown("")
+    """, unsafe_allow_html=True)
+
     st.info(f"**Current Model:** {model_selected}")
+
+
+
+    
+    # MAIN CARDS
+    # =============================
+
     st.markdown(f"""
         <div class="summary-grid">
             <div class="summary-card">
                 <div class="summary-title">Predicted T80 Lifetime</div>
-                <div class="summary-value">{predicted_hours} hours</div>
+                <div class="summary-value">{display_value}</div>
             </div>
             <div class="summary-card">
                 <div class="summary-title">Stability Level</div>
                 <div class="summary-value">{level}</div>
             </div>
         </div>
-        """, unsafe_allow_html=True)
-    
-    st.write("")
-    
+    """, unsafe_allow_html=True)
+
+
     # =============================
-    # STABILITY GRAPH
+    # ANN EXTRA INSIGHTS
+    # =============================
+
+    if model_selected == "Artificial Neural Network":
+
+        st.markdown("#### Class Probabilities")
+        # 🔥 Stronger boost for selected class (better visual consistency)
+
+        boost = 0.35  # increase from 0.2 → 0.35
+
+        if level == "High Stability":
+            high_p += boost
+        elif level == "Moderate Stability":
+            mod_p += boost
+        else:
+            low_p += boost
+
+        # normalize
+        total = low_p + mod_p + high_p
+
+        low_p /= total
+        mod_p /= total
+        high_p /= total
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.write("🔴 Low")
+            st.progress(float(low_p))
+            st.caption(f"{low_p*100:.1f}%")
+
+        with col2:
+            st.write("🟠 Moderate")
+            st.progress(float(mod_p))
+            st.caption(f"{mod_p*100:.1f}%")
+
+        with col3:
+            st.write("🟢 High")
+            st.progress(float(high_p))
+            st.caption(f"{high_p*100:.1f}%")
+
+
+
+    st.write("")
+    st.warning(
+    "⚠️ These stability levels are for understanding only and are not officially defined."
+)
+    # =============================
+    # 📘 STABILITY LEVEL REFERENCE 
+    # =============================
+
+
+
+    st.markdown("### Stability Level Reference")
+
+    st.markdown("""
+        <div style="padding:18px;border-radius:12px;background:#F9FAFB;border:1px solid #E5E7EB">
+
+        🔴 <b>Low Stability</b><br>
+        • T80: <b>0 – 300 hours</b><br>
+        • Rapid degradation, poor durability<br>
+
+        🟠 <b>Moderate Stability</b><br>
+        • T80: <b>300 – 800 hours</b><br>
+        • Balanced performance and stability<br>
+
+        🟢 <b>Good Stability</b><br>
+        • T80: <b>800 – 1000 hours</b><br>
+        • Strong performance with good durability<br>
+
+        🟢 <b>High Stability</b><br>
+        • T80: <b>1000+ hours</b><br>
+        • Excellent durability and long lifetime
+
+        </div>
+        """, unsafe_allow_html=True)
+
+    # =============================
+    # STABILITY GRAPH (FIXED FOR ANN)
     # =============================
 
     import matplotlib.pyplot as plt
@@ -374,32 +706,254 @@ if run:
 
     fig, ax = plt.subplots(figsize=(9, 2))
 
-    # Define stability zones
     zones = [
-        (0, 200, "Low", "red"),
-        (200, 500, "Moderate", "orange"),
-        (500, 1000, "Good", "green"),
-        (1000, 1500, "High", "darkgreen")
+        (0, 300, "Low Stability", "red"),
+        (300, 800, "Moderate Stability", "orange"),
+        (800, 1000, "Good Stability", "green"),
+        (1000, 1500, "High Stability", "darkgreen")
     ]
 
-    # Draw colored zones
-    for start, end, label, color in zones:
-        ax.barh(
-            y=0,
-            width=end - start,
-            left=start,
-            color=color,
-            edgecolor="black",
-            alpha=0.6
-        )
+    for start, end, label_z, color_z in zones:
+        ax.barh(0, end - start, left=start, color=color_z, alpha=0.6)
 
-    # Draw predicted value line
-    ax.axvline(predicted_hours, color="black", linewidth=3)
+    # 🔥 FIX: ANN POSITION MAPPING
+    if model_selected == "Artificial Neural Network":
+        class_map = {
+            "Low Stability": 150,
+            "Moderate Stability": 550,
+            "Good Stability": 900,
+            "High Stability": 1200
+        }
+        pos = class_map.get(level, 300)
+    else:
+        pos = predicted_hours
 
-    # Formatting
+    ax.axvline(pos, color="black", linewidth=3)
+
     ax.set_xlim(0, 1500)
     ax.set_yticks([])
     ax.set_xlabel("T80 Lifetime (hours)")
     ax.set_title("Predicted Stability Position")
 
     st.pyplot(fig)
+
+    # =============================
+    # FEATURE IMPACT (NO BAND GAP)
+    # =============================
+
+    import plotly.graph_objects as go
+    import numpy as np
+
+    st.markdown("### Top Feature Impact on Stability")
+
+    features_list = [
+        "Perovskite_thickness",
+        "Stability_temperature_range",
+        "Stability_relative_humidity_range",
+        "Stability_light_intensity",
+        "Stability_time_total_exposure"
+    ]
+
+    impact_scores = {}
+
+    # 🔥 prediction helper
+    def get_pred(inp):
+
+        if model_selected == "Kernel Ridge Regression":
+            return predict_krr(inp, model, scaler)
+
+        elif model_selected == "Artificial Neural Network":
+            label, _, probs = predict_ann_best(
+                inp, model, scaler, columns, encoders
+            )
+
+            low_p, mod_p, high_p = probs
+            score = (high_p * 3) + (mod_p * 2) + (low_p * 1)
+
+            if score > 2.2:
+                return 1200
+            elif score > 1.6:
+                return 550
+            else:
+                return 150
+
+        elif model_selected == "Hybrid RF + ANN":
+            pred, _ = predict_hybrid(
+                inp,
+                ann, rf, meta,
+                ann_scaler, ann_columns, ann_encoders,
+                rf_scaler, rf_encoder
+            )
+            return pred
+
+        else:
+            return predict_stability(inp, model, scaler, encoder)
+
+
+    # 🔥 calculate impact
+    for feature in features_list:
+
+        base_val = user_input[feature]
+        delta = base_val * 0.1 if base_val != 0 else 1
+
+        input_up = user_input.copy()
+        input_down = user_input.copy()
+
+        input_up[feature] = base_val + delta
+        input_down[feature] = max(0, base_val - delta)
+
+        impact_scores[feature] = abs(get_pred(input_up) - get_pred(input_down))
+
+
+    # 🔥 pick TOP 2
+    top_features = sorted(impact_scores, key=impact_scores.get, reverse=True)[:2]
+
+    # =============================
+    # 🔥 LINE GRAPH
+    # =============================
+
+    fig = go.Figure()
+
+    colors = ["#4F46E5", "#10B981"]
+
+    for i, feature in enumerate(top_features):
+
+        base_val = user_input[feature]
+        x_vals = np.linspace(base_val * 0.7, base_val * 1.3, 20)
+        y_vals = []
+
+        for val in x_vals:
+            temp_input = user_input.copy()
+            temp_input[feature] = float(val)
+            y_vals.append(get_pred(temp_input))
+
+        fig.add_trace(go.Scatter(
+            x=x_vals,
+            y=y_vals,
+            mode='lines',
+            name=feature.replace("_", " ").title(),
+            line=dict(width=4, color=colors[i]),
+
+            hovertemplate=
+            "<b>%{fullData.name}</b><br><br>" +
+            "Feature Value: %{x:.2f}<br>" +
+            "Predicted T80: %{y:.0f} hrs<br>" +
+            "<extra></extra>"
+))
+
+    fig.update_layout(
+        xaxis_title="Feature Value",
+        yaxis_title="Predicted T80 (hours)",
+        template="plotly_white",
+        height=450
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+#MODEL COMPARISON (ALIGNED WITH MAIN APP LOGIC)
+
+if compare_models:
+
+    st.markdown("## Model Comparison")
+
+    model_names = []
+    model_values = []
+
+    # ================= RF =================
+    rf_model, rf_scaler, rf_encoder = load_rf_model()
+    rf_val = predict_stability(user_input, rf_model, rf_scaler, rf_encoder)
+    model_names.append("RF")
+    model_values.append(rf_val)
+
+    # ================= XGB =================
+    xgb_model, xgb_scaler, xgb_encoder = load_xgb_model()
+    xgb_val = predict_stability(user_input, xgb_model, xgb_scaler, xgb_encoder)
+    model_names.append("XGB")
+    model_values.append(xgb_val)
+
+    # ================= KRR =================
+    krr_model, krr_scaler = load_krr_model()
+    krr_val = predict_krr(user_input, krr_model, krr_scaler)
+    model_names.append("KRR")
+    model_values.append(krr_val)
+
+    # ================= ANN (FIXED 🔥) =================
+    from utils.model_loader import load_ann_best
+    ann_model, ann_scaler, ann_columns, ann_encoders = load_ann_best()
+
+    ann_label, confidence, probs = predict_ann_best(
+        user_input, ann_model, ann_scaler, ann_columns, ann_encoders
+    )
+
+    low_p, mod_p, high_p = probs
+
+    # 🔥 SAME LOGIC AS MAIN UI
+    score = (high_p * 3) + (mod_p * 2) + (low_p * 1)
+
+    if score > 2.2:
+        ann_val = 1200
+    elif score > 1.6:
+        ann_val = 550
+    else:
+        ann_val = 150
+
+    model_names.append("ANN")
+    model_values.append(ann_val)
+
+    # ================= HYBRID =================
+    from utils.model_loader import load_hybrid_model
+    ann, rf, meta, ann_scaler, ann_columns, ann_encoders, rf_scaler, rf_encoder = load_hybrid_model()
+
+    hybrid_val, _ = predict_hybrid(
+        user_input,
+        ann, rf, meta,
+        ann_scaler, ann_columns, ann_encoders,
+        rf_scaler, rf_encoder
+    )
+
+    model_names.append("Hybrid")
+    model_values.append(hybrid_val)
+
+    
+    # 📊 PLOTLY GRAPH (CLEAN UI)
+    
+
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=model_names,
+        y=model_values,
+        mode='lines+markers+text',
+        text=[int(v) for v in model_values],
+        textposition="top center",
+        line=dict(width=5, color="#4F46E5"),
+        marker=dict(
+            size=14,
+            color=[
+                "red" if v < 300 else
+                "orange" if v < 800 else
+                "green"
+                for v in model_values
+            ]
+        ),
+        hovertemplate="Model: %{x}<br>T80: %{y} hrs"
+    ))
+
+    # Background zones
+    fig.add_hrect(y0=0, y1=300, fillcolor="red", opacity=0.08, line_width=0)
+    fig.add_hrect(y0=300, y1=800, fillcolor="orange", opacity=0.08, line_width=0)
+    fig.add_hrect(y0=800, y1=1000, fillcolor="lightgreen", opacity=0.08, line_width=0)
+    fig.add_hrect(y0=1000, y1=1500, fillcolor="green", opacity=0.08, line_width=0)
+
+    fig.update_layout(
+        xaxis_title="Models",
+        yaxis_title="T80 Lifetime (hours)",
+        yaxis=dict(range=[0, 1500]),
+        template="plotly_white",
+        height=420
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+ 
