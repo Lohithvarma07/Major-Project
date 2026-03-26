@@ -186,7 +186,9 @@ def predict_ann_best(user_input, model, scaler, columns, encoders):
     # ==========================
     # ALIGN + SCALE
     # ==========================
-    df = df[columns]
+    df = df.reindex(columns=columns, fill_value=0)
+    df = df.fillna(0)
+    df = df.replace([np.inf, -np.inf], 0)
     X = scaler.transform(df.values.astype(float))
 
     # ==========================
@@ -194,8 +196,12 @@ def predict_ann_best(user_input, model, scaler, columns, encoders):
     # ==========================
     probs = model.predict(X)[0]
 
+    # 🔥 safety fix
+    if np.isnan(probs).any():
+        probs = np.array([0.33, 0.33, 0.34])
+
     pred_class = np.argmax(probs)
-    confidence = float(np.max(probs))
+    confidence = float(np.max(probs)) if not np.isnan(probs).any() else 0.0
 
     labels = {
         0: "Low Stability",
@@ -251,7 +257,9 @@ def predict_hybrid(user_input,
     df_ann["interaction"] = df_ann["Perovskite_band_gap"] * df_ann["Perovskite_thickness"]
     df_ann["env_effect"] = df_ann["Stability_temperature_range"] * df_ann["Stability_relative_humidity_range"]
 
-    df_ann = df_ann[ann_columns]
+    df_ann = df_ann.reindex(columns=ann_columns, fill_value=0)
+    df_ann = df_ann.fillna(0)
+    df_ann = df_ann.replace([np.inf, -np.inf], 0)
 
     X_ann = ann_scaler.transform(df_ann.values.astype(float))
     ann_probs = ann.predict(X_ann)[0]
