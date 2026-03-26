@@ -637,27 +637,33 @@ if run:
         else:
             low_p += boost
 
-        # normalize
+                # normalize
         total = low_p + mod_p + high_p
 
-        low_p /= total
-        mod_p /= total
-        high_p /= total
+        if total == 0:
+            low_p, mod_p, high_p = 0.33, 0.33, 0.34
+        else:
+            low_p /= total
+            mod_p /= total
+            high_p /= total
         col1, col2, col3 = st.columns(3)
+        low_p = max(0, min(1, low_p))
+        mod_p = max(0, min(1, mod_p))
+        high_p = max(0, min(1, high_p))
 
         with col1:
             st.write("🔴 Low")
-            st.progress(float(low_p)/ 100)
+            st.progress(float(low_p))
             st.caption(f"{low_p*100:.1f}%")
 
         with col2:
             st.write("🟠 Moderate")
-            st.progress(float(mod_p/ 100))
+            st.progress(float(mod_p))
             st.caption(f"{mod_p*100:.1f}%")
 
         with col3:
             st.write("🟢 High")
-            st.progress(float(high_p)/ 100)
+            st.progress(float(high_p))
             st.caption(f"{high_p*100:.1f}%")
 
 
